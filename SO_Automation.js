@@ -8,51 +8,81 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
 
     function post(context) {
         try {
-            log.debug('Incoming Payload', JSON.stringify(context));
+            addLog('START', 'Incoming payload received', context);
 
-            if (isEmpty(context.user)) return err('MISSING_EMAIL', 'User email is missing.');
-            if (isEmpty(context.otherrefnum)) return err('MISSING_PO', 'PO # / otherrefnum is missing.');
-
-            var customerId = getCustomerByEmail(context.user);
-            if (!customerId) return err('CUSTOMER_NOT_FOUND', 'Customer not found for email: ' + context.user);
-
-            var itemList = context.item_list || [];
-            if (!itemList.length) return err('NO_ITEMS', 'No item_list found in payload.');
-
-            var otherRefNum = String(context.otherrefnum).trim();
-            var locationId = getLocationId(context.location);
-
-            if (!locationId) {
-                return err('INVALID_LOCATION', 'Invalid location passed: ' + context.location);
+            if (isEmpty(context.user)) {
+                return sendError('MISSING_EMAIL', 'User email is missing.');
             }
 
-            log.debug('Header Values', {
-                customerId: customerId,
-                otherrefnum: otherRefNum,
+            var customerId = getCustomerByEmail(context.user);
+
+            if (!customerId) {
+                return sendError('CUSTOMER_NOT_FOUND', 'Customer not found for email: ' + context.user);
+            }
+
+            addLog('CUSTOMER_FOUND', 'Customer found from email', {
+                email: context.user,
+                customerId: customerId
+            });
+
+            var itemList = context.item_list || [];
+
+            if (!itemList || itemList.length === 0) {
+                return sendError('NO_ITEMS', 'No item_list found in payload.');
+            }
+
+            if (isEmpty(context.otherrefnum)) {
+                return sendError('MISSING_PO', 'PO # / otherrefnum is missing.');
+            }
+
+            var otherRefNum = String(context.otherrefnum).trim();
+
+            var locationId = DEFAULT_LOCATION_ID;
+
+            if (!isEmpty(context.location)) {
+                locationId = Number(String(context.location).trim());
+
+                if (!locationId || isNaN(locationId)) {
+                    return sendError('INVALID_LOCATION', 'Invalid location passed: ' + context.location);
+                }
+            }
+
+            addLog('LOCATION_SELECTED', 'Location selected for Quote', {
+                locationFromPayload: context.location,
                 locationUsed: locationId
             });
 
-            var quoteSearch = getQuotesByPO(otherRefNum);
+            var quoteSearchResult = getQuotesByOtherRefNum(otherRefNum);
 
-            log.debug('Quote Search Result', quoteSearch);
+            addLog('QUOTE_SEARCH_COMPLETED', 'Quote search completed for PO #', {
+                otherrefnum: otherRefNum,
+                matchCount: quoteSearchResult.count,
+                matchedQuotes: quoteSearchResult.quotes
+            });
 
-            if (quoteSearch.count > 1) {
+            if (quoteSearchResult.count > 1) {
                 return {
                     success: false,
                     name: 'MULTIPLE_QUOTES_FOUND',
                     message: 'Multiple Quotes found for PO # ' + otherRefNum + '. No record was created or updated.',
                     otherrefnum: otherRefNum,
-                    matchCount: quoteSearch.count,
-                    matchedQuotes: quoteSearch.quotes
+                    matchCount: quoteSearchResult.count,
+                    matchedQuotes: quoteSearchResult.quotes
                 };
+            }
+
+            var existingQuote = null;
+
+            if (quoteSearchResult.count === 1) {
+                existingQuote = quoteSearchResult.quotes[0];
             }
 
             var quoteRec;
             var isUpdate = false;
-            var existingQuote = quoteSearch.count === 1 ? quoteSearch.quotes[0] : null;
 
-            if (existingQuote) {
-                if (!isOpenStatus(existingQuote.status)) {
+            if (existingQuote && existingQuote.id) {
+
+                if (!isOpenStatus(existingQuote.statusText)) {
                     return {
                         success: false,
                         name: 'QUOTE_ALREADY_EXISTS',
@@ -60,11 +90,13 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
                         otherrefnum: otherRefNum,
                         quoteId: existingQuote.id,
                         quoteNumber: existingQuote.tranid,
-                        status: existingQuote.status
+                        status: existingQuote.statusText
                     };
                 }
 
                 isUpdate = true;
+
+                addLog('UPDATE_MODE', 'One open Quote found. Existing Quote will be updated.', existingQuote);
 
                 quoteRec = record.load({
                     type: record.Type.ESTIMATE,
@@ -72,14 +104,19 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
                     isDynamic: true
                 });
 
-                var removedCount = removeAllLines(quoteRec);
+                var removedLineCount = removeAllItemLines(quoteRec);
 
-                log.debug('Update Existing Quote', {
+                addLog('LINES_REMOVED', 'Existing item lines removed from Quote', {
                     quoteId: existingQuote.id,
-                    removedLineCount: removedCount
+                    removedLineCount: removedLineCount
                 });
 
             } else {
+
+                addLog('CREATE_MODE', 'No existing Quote found. New Quote will be created.', {
+                    otherrefnum: otherRefNum
+                });
+
                 quoteRec = record.create({
                     type: record.Type.ESTIMATE,
                     isDynamic: true
@@ -88,10 +125,6 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
                 quoteRec.setValue({
                     fieldId: 'entity',
                     value: Number(customerId)
-                });
-
-                log.debug('Create New Quote', {
-                    customerId: customerId
                 });
             }
 
@@ -124,19 +157,29 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
 
             for (var i = 0; i < itemList.length; i++) {
                 var line = itemList[i];
+
                 var itemId = line.ItemNumber;
 
                 if (!itemId && !isEmpty(line.sku)) {
                     var sku = String(line.sku).trim();
-                    itemId = itemCache[sku] || getItemBySku(sku);
-                    itemCache[sku] = itemId;
+
+                    if (itemCache[sku]) {
+                        itemId = itemCache[sku];
+                    } else {
+                        itemId = getItemBySku(sku);
+                        itemCache[sku] = itemId;
+                    }
                 }
 
-                if (!itemId) return err('ITEM_NOT_FOUND', 'Item not found. SKU: ' + line.sku);
+                if (!itemId) {
+                    return sendError('ITEM_NOT_FOUND', 'Item not found. SKU: ' + line.sku);
+                }
 
-                var qty = Number(line.quantity) || 1;
+                var quantity = Number(line.quantity) || 1;
 
-                quoteRec.selectNewLine({ sublistId: 'item' });
+                quoteRec.selectNewLine({
+                    sublistId: 'item'
+                });
 
                 quoteRec.setCurrentSublistValue({
                     sublistId: 'item',
@@ -148,27 +191,8 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
                 quoteRec.setCurrentSublistValue({
                     sublistId: 'item',
                     fieldId: 'quantity',
-                    value: qty
+                    value: quantity
                 });
-
-              
-              if (!isEmpty(line.options)) {
-                    quoteRec.setCurrentSublistValue({
-                              sublistId: 'item',
-                              fieldId: 'custcol_mb_so_custom_modification',
-                              value: String(line.options)
-                    });
-              }
-
-              var colorCode = line.color_code || null;
-                if (colorCode && Number(colorCode) >= 101 && Number(colorCode) <= 200) {
-                    quoteRec.setCurrentSublistValue({
-                        sublistId: 'item',
-                        fieldId: 'custcol_yy_mod_cplus_color',
-                        value: Number(colorCode) - 80
-                    });
-                }
-
 
                 quoteRec.setCurrentSublistValue({
                     sublistId: 'item',
@@ -177,26 +201,38 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
                     forceSyncSourcing: true
                 });
 
-                quoteRec.commitLine({ sublistId: 'item' });
+                quoteRec.commitLine({
+                    sublistId: 'item'
+                });
 
                 addedLines.push({
+                    line: i + 1,
                     sku: line.sku,
                     itemId: itemId,
-                    quantity: qty
+                    quantity: quantity
                 });
             }
 
-            log.debug('Lines Added', addedLines);
+            addLog('LINES_ADDED', 'Payload item lines added to Quote', {
+                addedLineCount: addedLines.length,
+                addedLines: addedLines
+            });
+
+            addLog('BEFORE_SAVE', 'Quote values before save', {
+                mode: isUpdate ? 'UPDATE_EXISTING_QUOTE' : 'CREATE_NEW_QUOTE',
+                entity: quoteRec.getValue({ fieldId: 'entity' }),
+                otherrefnum: quoteRec.getValue({ fieldId: 'otherrefnum' }),
+                location: quoteRec.getValue({ fieldId: 'location' })
+            });
 
             var quoteId = quoteRec.save({
                 enableSourcing: true,
                 ignoreMandatoryFields: false
             });
 
-            log.audit('Quote Saved', {
+            addLog('SUCCESS', 'Quote saved successfully', {
                 quoteId: quoteId,
-                mode: isUpdate ? 'updated_existing_quote' : 'created_new_quote',
-                otherrefnum: otherRefNum
+                mode: isUpdate ? 'updated_existing_quote' : 'created_new_quote'
             });
 
             return {
@@ -215,22 +251,13 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
             return {
                 success: false,
                 name: e.name,
-                message: e.message
+                message: e.message,
+                stack: e.stack
             };
         }
     }
 
-    function getLocationId(location) {
-        if (isEmpty(location)) return DEFAULT_LOCATION_ID;
-
-        var locationId = Number(String(location).trim());
-
-        if (!locationId || isNaN(locationId)) return null;
-
-        return locationId;
-    }
-
-    function getQuotesByPO(otherRefNum) {
+    function getQuotesByOtherRefNum(otherRefNum) {
         var quoteSearchObj = search.create({
             type: search.Type.ESTIMATE,
             filters: [
@@ -247,74 +274,130 @@ define(['N/record', 'N/log', 'N/search'], function (record, log, search) {
             ]
         });
 
-        var paged = quoteSearchObj.runPaged({ pageSize: 1000 });
-        var results = quoteSearchObj.run().getRange({ start: 0, end: 20 });
-        var quotes = [];
+        var pagedData = quoteSearchObj.runPaged({
+            pageSize: 1000
+        });
 
-        for (var i = 0; results && i < results.length; i++) {
-            quotes.push({
-                id: results[i].getValue({ name: 'internalid' }),
-                tranid: results[i].getValue({ name: 'tranid' }),
-                status: results[i].getText({ name: 'status' }) || results[i].getValue({ name: 'status' }),
-                otherrefnum: results[i].getValue({ name: 'otherrefnum' }),
-                customer: results[i].getText({ name: 'entity' })
-            });
+        var results = quoteSearchObj.run().getRange({
+            start: 0,
+            end: 20
+        });
+
+        var quoteList = [];
+
+        if (results && results.length > 0) {
+            for (var i = 0; i < results.length; i++) {
+                quoteList.push({
+                    id: results[i].getValue({ name: 'internalid' }),
+                    tranid: results[i].getValue({ name: 'tranid' }),
+                    statusText: results[i].getText({ name: 'status' }) || results[i].getValue({ name: 'status' }),
+                    otherrefnum: results[i].getValue({ name: 'otherrefnum' }),
+                    customer: results[i].getText({ name: 'entity' })
+                });
+            }
         }
 
+        log.debug('Quote Search Result', {
+            otherrefnum: otherRefNum,
+            count: pagedData.count,
+            quotes: quoteList
+        });
+
         return {
-            count: paged.count,
-            quotes: quotes
+            count: pagedData.count,
+            quotes: quoteList
         };
     }
 
-    function removeAllLines(recObj) {
-        var count = recObj.getLineCount({ sublistId: 'item' });
+    function removeAllItemLines(quoteRec) {
+        var lineCount = quoteRec.getLineCount({
+            sublistId: 'item'
+        });
 
-        for (var i = count - 1; i >= 0; i--) {
-            recObj.removeLine({
+        for (var i = lineCount - 1; i >= 0; i--) {
+            quoteRec.removeLine({
                 sublistId: 'item',
                 line: i,
                 ignoreRecalc: true
             });
         }
 
-        return count;
+        return lineCount;
+    }
+
+    function isOpenStatus(statusText) {
+        if (isEmpty(statusText)) {
+            return false;
+        }
+
+        return String(statusText).toLowerCase().indexOf('open') !== -1;
     }
 
     function getCustomerByEmail(email) {
-        var s = search.create({
+        var customerSearchObj = search.create({
             type: search.Type.CUSTOMER,
-            filters: [['email', 'is', String(email)]],
-            columns: [search.createColumn({ name: 'internalid' })]
+            filters: [
+                ['email', 'is', String(email)]
+            ],
+            columns: [
+                search.createColumn({ name: 'internalid' })
+            ]
         });
 
-        var r = s.run().getRange({ start: 0, end: 1 });
+        var results = customerSearchObj.run().getRange({
+            start: 0,
+            end: 1
+        });
 
-        return r && r.length ? r[0].getValue({ name: 'internalid' }) : null;
+        if (results && results.length > 0) {
+            return results[0].getValue({
+                name: 'internalid'
+            });
+        }
+
+        return null;
     }
 
     function getItemBySku(sku) {
-        var s = search.create({
+        var itemSearchObj = search.create({
             type: search.Type.ITEM,
-            filters: [['itemid', 'is', String(sku)]],
-            columns: [search.createColumn({ name: 'internalid' })]
+            filters: [
+                ['itemid', 'is', String(sku)]
+            ],
+            columns: [
+                search.createColumn({ name: 'internalid' })
+            ]
         });
 
-        var r = s.run().getRange({ start: 0, end: 1 });
+        var results = itemSearchObj.run().getRange({
+            start: 0,
+            end: 1
+        });
 
-        return r && r.length ? r[0].getValue({ name: 'internalid' }) : null;
+        if (results && results.length > 0) {
+            return results[0].getValue({
+                name: 'internalid'
+            });
+        }
+
+        return null;
     }
 
-    function isOpenStatus(status) {
-        return !isEmpty(status) && String(status).toLowerCase().indexOf('open') !== -1;
+    function isEmpty(value) {
+        return value === null || value === undefined || String(value).trim() === '';
     }
 
-    function isEmpty(v) {
-        return v === null || v === undefined || String(v).trim() === '';
+    function addLog(step, message, details) {
+        log.debug(step, {
+            message: message,
+            details: details || {}
+        });
     }
 
-    function err(name, message) {
-        log.error(name, message);
+    function sendError(name, message) {
+        log.error(name, {
+            message: message
+        });
 
         return {
             success: false,
