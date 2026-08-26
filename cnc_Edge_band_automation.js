@@ -67,6 +67,8 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
 
     const afterSubmit = (context) => {
 
+        let step = 'init';
+
         try {
 
             if (context.type !== context.UserEventType.CREATE &&
@@ -142,6 +144,8 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
 
 
             // 1 LOAD - dynamic is required, item options cannot be written in standard mode
+            step = 'load';
+
             const so = record.load({
                 type: record.Type.SALES_ORDER,
                 id: soId,
@@ -159,8 +163,10 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
 
                 if (src === -1) return;
 
+                step = 'selectLine ' + src + ' item ' + l.itemId;
                 so.selectLine({ sublistId: 'item', line: src });
 
+                step = 'set ' + EDGE_FIELD + ' on line ' + src;
                 so.setCurrentSublistText({
                     sublistId: 'item',
                     fieldId: EDGE_FIELD,
@@ -168,6 +174,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                     ignoreFieldChange: true
                 });
 
+                step = 'commit main line ' + src;
                 so.commitLine({ sublistId: 'item' });
 
 
@@ -178,8 +185,10 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                     value: l.lineKey
                 });
 
+                step = 'insertLine at ' + (src + 1);
                 so.insertLine({ sublistId: 'item', line: src + 1 });
 
+                step = 'set markup item at ' + (src + 1);
                 so.setCurrentSublistValue({ sublistId: 'item', fieldId: 'item', value: MARKUP_ITEM });
 
                 if (po107) {
@@ -198,6 +207,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                     });
                 }
 
+                step = 'commit markup line at ' + (src + 1);
                 so.commitLine({ sublistId: 'item' });
             });
 
@@ -208,15 +218,23 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                 value: clmKey
             });
 
+            step = 'removeLine';
             if (pos > -1) so.removeLine({ sublistId: 'item', line: pos });
 
             // 1 SAVE
+            step = 'save';
             so.save({ enableSourcing: true, ignoreMandatoryFields: false });
 
             log.audit('SUCCESS', { so: soId, markupLines: eligible.length, po107, assigned });
 
         } catch (e) {
-            log.error('SO EDGE BAND ERROR', { so: context.newRecord.id, message: e.message });
+            log.error('SO EDGE BAND ERROR', {
+                so: context.newRecord.id,
+                step,
+                name: e.name,
+                message: e.message,
+                stack: e.stack
+            });
         }
     };
 
