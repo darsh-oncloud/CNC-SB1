@@ -1,18 +1,6 @@
 /**
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
- *
- * SALES ORDER - EDGE BAND MARKUP
- *
- * Trigger:
- *   Item 429828 + PO107 = CLM_EB
- *
- * Process:
- *   1. Find items eligible for Edge Band option 9097
- *   2. Set custcol_yy_mod_edgeband = Yes on eligible MAIN item
- *   3. Add markup item 306264 directly underneath
- *   4. Copy PO107 + Assigned ID from original CLM_EB placeholder
- *   5. Remove original placeholder item 429828
  */
 define(['N/search', 'N/record', 'N/query', 'N/log'],
 (search, record, query, log) => {
@@ -20,10 +8,11 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
     const CUSTOMER    = '161136';
     const CLM_ITEM    = '429828';
     const MARKUP_ITEM = '306264';
-    const EDGE_OPTION = '9097';
 
-    // Transaction Item Option field
-    const EDGE_FIELD = 'custcol_yy_mod_edgeband';
+    const EDGE_OPTION_ID    = '9097'; // Item option internal ID
+    const EDGE_LINE_FIELD   = 'custcol_yy_mod_edgeband';
+    const EDGE_YES_VALUE    = '1';    // Field Explorer shows Yes = "1"
+
 
     const ITEM_TABLES = [
         'assemblyitem',
@@ -46,7 +35,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
 
 
     // ---------------------------------------------------------
-    // Find items that have Edge Band Item Option 9097
+    // Find which items have Edge Band option 9097
     // ---------------------------------------------------------
     const getEdgeItems = ids => {
 
@@ -69,23 +58,28 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
 
                 rows.forEach(row => {
 
+                    const id = String(row.id);
+
                     const options = String(row.itemoptions || '')
                         .split(',')
                         .map(v => v.trim());
 
-                    if (options.includes(EDGE_OPTION)) {
-                        edge[String(row.id)] = true;
+
+                    if (options.includes(EDGE_OPTION_ID)) {
+                        edge[id] = true;
                     }
 
+
                     left = left.filter(
-                        id => id !== Number(row.id)
+                        itemId => itemId !== Number(row.id)
                     );
                 });
 
             } catch (e) {
-                // Continue to next item type
+                // Continue with next item table
             }
         });
+
 
         return edge;
     };
@@ -99,43 +93,53 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             if (
                 context.type !== context.UserEventType.CREATE &&
                 context.type !== context.UserEventType.EDIT
-            ) return;
+            ) {
+                return;
+            }
 
 
             const soId = context.newRecord.id;
 
-            if (
-                String(
-                    context.newRecord.getValue({
-                        fieldId: 'entity'
-                    })
-                ) !== CUSTOMER
-            ) return;
+            const customer = String(
+                context.newRecord.getValue({
+                    fieldId: 'entity'
+                })
+            );
+
+
+            if (customer !== CUSTOMER) return;
+
 
 
             // =====================================================
             // SEARCH 1
-            // Trigger ONLY when:
-            // Item = 429828
-            // PO107 = CLM_EB
+            // Trigger ONLY:
+            // Item 429828 + PO107 = CLM_EB
             // =====================================================
             const clm = search.create({
 
                 type: search.Type.SALES_ORDER,
 
                 filters: [
+
                     ['internalid', 'anyof', soId],
                     'AND',
+
                     ['mainline', 'is', 'F'],
                     'AND',
+
                     ['taxline', 'is', 'F'],
                     'AND',
+
                     ['cogs', 'is', 'F'],
                     'AND',
+
                     ['shipping', 'is', 'F'],
                     'AND',
+
                     ['item', 'anyof', CLM_ITEM],
                     'AND',
+
                     ['custcolproductserviceid_po107', 'is', 'CLM_EB']
                 ],
 
@@ -151,28 +155,31 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             });
 
 
-            // Must have exactly one placeholder
+            // Must have exactly one original placeholder
             if (clm.length !== 1) return;
 
 
             const clmKey = String(
                 clm[0].getValue({
                     name: 'lineuniquekey'
-                }) || ''
+                })
             );
+
 
             const assigned = clm[0].getValue({
                 name: 'custcolassigned_id'
             });
+
 
             const po107 = clm[0].getValue({
                 name: 'custcolproductserviceid_po107'
             });
 
 
+
             // =====================================================
             // SEARCH 2
-            // Get possible main items
+            // Get possible Edge Band source items
             // =====================================================
             const lines = [];
 
@@ -182,29 +189,37 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                 type: search.Type.SALES_ORDER,
 
                 filters: [
+
                     ['internalid', 'anyof', soId],
                     'AND',
+
                     ['mainline', 'is', 'F'],
                     'AND',
+
                     ['taxline', 'is', 'F'],
                     'AND',
+
                     ['cogs', 'is', 'F'],
                     'AND',
+
                     ['shipping', 'is', 'F']
                 ],
 
                 columns: [
                     'item',
-                    'lineuniquekey'
+                    'lineuniquekey',
+                    'custcolproductserviceid_po107'
                 ]
 
             }).run().each(r => {
+
 
                 const itemId = String(
                     r.getValue({
                         name: 'item'
                     }) || ''
                 );
+
 
                 const lineKey = String(
                     r.getValue({
@@ -213,20 +228,32 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                 );
 
 
-                // Do not consider:
-                // Original placeholder
-                // Markup item
-                if (
-                    lineKey !== clmKey &&
-                    itemId !== CLM_ITEM &&
-                    itemId !== MARKUP_ITEM
-                ) {
+                const linePo107 = String(
+                    r.getValue({
+                        name: 'custcolproductserviceid_po107'
+                    }) || ''
+                );
 
-                    lines.push({
-                        itemId,
-                        lineKey
-                    });
+
+                // Skip:
+                // original placeholder
+                // markup item
+                // any CLM_EB line
+                if (
+                    lineKey === clmKey ||
+                    itemId === CLM_ITEM ||
+                    itemId === MARKUP_ITEM ||
+                    linePo107 === 'CLM_EB'
+                ) {
+                    return true;
                 }
+
+
+                lines.push({
+                    itemId,
+                    lineKey
+                });
+
 
                 return true;
             });
@@ -235,16 +262,19 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             if (!lines.length) return;
 
 
+
             // =====================================================
             // CHECK WHICH ITEMS SUPPORT EDGE BAND
             // =====================================================
-            const itemIds = [
+            const uniqueIds = [
                 ...new Set(
-                    lines.map(x => Number(x.itemId))
+                    lines.map(line => Number(line.itemId))
                 )
             ];
 
-            const edgeItems = getEdgeItems(itemIds);
+
+            const edgeItems = getEdgeItems(uniqueIds);
+
 
             const eligible = lines.filter(
                 line => edgeItems[line.itemId]
@@ -262,6 +292,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             }
 
 
+
             // =====================================================
             // LOAD SALES ORDER ONCE
             // =====================================================
@@ -272,10 +303,12 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             });
 
 
+
             // =====================================================
-            // PROCESS ELIGIBLE ITEMS
+            // PROCESS EACH ELIGIBLE MAIN ITEM
             // =====================================================
             eligible.forEach(line => {
+
 
                 const src = so.findSublistLineWithValue({
                     sublistId: 'item',
@@ -287,20 +320,22 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                 if (src === -1) return;
 
 
+
                 // -------------------------------------------------
-                // NEW CHANGE:
-                // Set EDGE BAND = YES on MAIN eligible item
+                // NEW:
+                // Set Edge Band = Yes on MAIN eligible item
                 // -------------------------------------------------
-                so.setSublistText({
+                so.setSublistValue({
                     sublistId: 'item',
-                    fieldId: EDGE_FIELD,
+                    fieldId: EDGE_LINE_FIELD,
                     line: src,
-                    text: 'Yes'
+                    value: EDGE_YES_VALUE
                 });
 
 
+
                 // -------------------------------------------------
-                // Add markup directly underneath
+                // Add markup item directly underneath
                 // -------------------------------------------------
                 const newLine = src + 1;
 
@@ -319,6 +354,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                 });
 
 
+
                 // PO107 from original placeholder
                 if (po107) {
 
@@ -329,6 +365,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                         value: po107
                     });
                 }
+
 
 
                 // Assigned ID from original placeholder
@@ -345,25 +382,34 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             });
 
 
+
             // =====================================================
-            // REMOVE ORIGINAL 429828 + CLM_EB PLACEHOLDER
+            // REMOVE ORIGINAL PLACEHOLDER
+            // 429828 + CLM_EB
             // =====================================================
-            const pos = so.findSublistLineWithValue({
-                sublistId: 'item',
-                fieldId: 'lineuniquekey',
-                value: clmKey
-            });
+            const clmPosition =
+                so.findSublistLineWithValue({
+
+                    sublistId: 'item',
+                    fieldId: 'lineuniquekey',
+                    value: clmKey
+
+                });
 
 
-            if (pos === -1) {
-                throw Error('Original CLM_EB placeholder not found');
+            if (clmPosition === -1) {
+
+                throw Error(
+                    'Original CLM_EB placeholder line not found'
+                );
             }
 
 
             so.removeLine({
                 sublistId: 'item',
-                line: pos
+                line: clmPosition
             });
+
 
 
             // =====================================================
@@ -375,10 +421,11 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             });
 
 
+
             log.audit('SUCCESS', {
                 so: soId,
-                edgeBandItems: eligible.length,
-                markupLines: eligible.length,
+                edgeItemsUpdated: eligible.length,
+                markupLinesAdded: eligible.length,
                 po107,
                 assigned
             });
@@ -394,6 +441,8 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
     };
 
 
-    return { afterSubmit };
+    return {
+        afterSubmit
+    };
 
 });
