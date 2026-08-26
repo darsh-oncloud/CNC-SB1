@@ -7,47 +7,196 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
 
     const CUSTOMER_ID = '161136';
     const MARKUP_ITEM = '306264';
-    const EDGE_OPTION = 'CUSTCOL_YY_MOD_EDGEBAND';
+    const EDGE_OPTION_ID = '9097';
+
+    /*
+     * SuiteQL item tables.
+     * We query only the type actually present on the SO.
+     */
+    const ITEM_TABLES = {
+        Assembly: [
+            'assemblyitem',
+            'serializedassemblyitem',
+            'lotnumberedassemblyitem'
+        ],
+
+        InvtPart: [
+            'inventoryitem',
+            'serializedinventoryitem',
+            'lotnumberedinventoryitem'
+        ],
+
+        Kit: [
+            'kititem'
+        ],
+
+        NonInvtPart: [
+            'noninventoryitem',
+            'noninventorysaleitem',
+            'noninventoryresaleitem'
+        ],
+
+        Service: [
+            'serviceitem',
+            'servicesaleitem',
+            'serviceresaleitem'
+        ],
+
+        OthCharge: [
+            'otherchargeitem',
+            'otherchargesaleitem',
+            'otherchargeresaleitem'
+        ]
+    };
+
+
+    // =========================================================
+    // GET ITEMS HAVING EDGE BAND OPTION 9097
+    // NO ITEM record.load()
+    // =========================================================
+    const getEdgeItems = (lines) => {
+
+        const byType = {};
+        const edgeItems = {};
+
+        lines.forEach(line => {
+
+            if (!ITEM_TABLES[line.itemType]) return;
+
+            if (!byType[line.itemType]) {
+                byType[line.itemType] = [];
+            }
+
+            if (!byType[line.itemType].includes(Number(line.itemId))) {
+                byType[line.itemType].push(Number(line.itemId));
+            }
+        });
+
+
+        Object.keys(byType).forEach(type => {
+
+            let remaining = byType[type];
+
+            ITEM_TABLES[type].forEach(table => {
+
+                if (!remaining.length) return;
+
+                const placeholders =
+                    remaining.map(() => '?').join(',');
+
+                try {
+
+                    const results = query.runSuiteQL({
+                        query: `
+                            SELECT id, itemoptions
+                            FROM ${table}
+                            WHERE id IN (${placeholders})
+                        `,
+                        params: remaining
+                    }).asMappedResults();
+
+
+                    if (!results.length) return;
+
+
+                    const found = [];
+
+                    results.forEach(row => {
+
+                        const id = String(row.id);
+
+                        const options = String(
+                            row.itemoptions || ''
+                        )
+                            .split(',')
+                            .map(v => v.trim());
+
+
+                        // EDGE BAND = Item Option Internal ID 9097
+                        if (options.includes(EDGE_OPTION_ID)) {
+                            edgeItems[id] = true;
+                        }
+
+                        found.push(Number(row.id));
+                    });
+
+
+                    // Don't query same items again from another subtype table
+                    remaining = remaining.filter(
+                        id => !found.includes(id)
+                    );
+
+                } catch (e) {
+                    // Table may not apply to this subtype - continue
+                }
+            });
+        });
+
+
+        return edgeItems;
+    };
+
 
     const afterSubmit = (context) => {
+
         try {
 
-            // CREATE only - prevents rerun after script saves SO
-            if (context.type !== context.UserEventType.CREATE) return;
+            // Run on CREATE and EDIT
+            if (
+                context.type !== context.UserEventType.CREATE &&
+                context.type !== context.UserEventType.EDIT
+            ) {
+                return;
+            }
+
 
             const soId = context.newRecord.id;
+
             const customerId = String(
-                context.newRecord.getValue({ fieldId: 'entity' })
+                context.newRecord.getValue({
+                    fieldId: 'entity'
+                })
             );
 
-            // Only required customer
-            if (customerId !== CUSTOMER_ID) return;
 
-            log.debug('START', {
-                soId,
-                customerId
-            });
+            if (customerId !== CUSTOMER_ID) return;
 
 
             // =====================================================
             // SEARCH 1
-            // Find original CLM_EB line
+            // ORIGINAL CLM_EB LINE ONLY
+            //
+            // IMPORTANT:
+            // exclude 306264 so script will not process itself again
+            // after saving the SO.
             // =====================================================
             const clmResults = search.create({
+
                 type: search.Type.SALES_ORDER,
+
                 filters: [
+
                     ['internalid', 'anyof', soId],
+
                     'AND',
                     ['mainline', 'is', 'F'],
+
                     'AND',
                     ['taxline', 'is', 'F'],
+
                     'AND',
                     ['cogs', 'is', 'F'],
+
                     'AND',
                     ['shipping', 'is', 'F'],
+
                     'AND',
-                    ['custcolproductserviceid_po107', 'is', 'CLM_EB']
+                    ['custcolproductserviceid_po107', 'is', 'CLM_EB'],
+
+                    'AND',
+                    ['item', 'noneof', MARKUP_ITEM]
                 ],
+
                 columns: [
                     'item',
                     'line',
@@ -55,80 +204,76 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                     'custcolassigned_id',
                     'custcolproductserviceid_po107'
                 ]
+
             }).run().getRange({
                 start: 0,
                 end: 2
             });
 
 
-            log.debug('CLM_EB Count', clmResults.length);
+            // No original CLM_EB = already processed / nothing to do
+            if (!clmResults.length) return;
 
 
-            // Must have EXACTLY one CLM_EB line
-            if (clmResults.length !== 1) {
+            // More than one original CLM_EB = do nothing
+            if (clmResults.length > 1) {
 
                 log.audit('STOP', {
-                    reason: 'CLM_EB count is not exactly 1',
-                    count: clmResults.length
+                    salesOrder: soId,
+                    reason: 'More than one original CLM_EB line'
                 });
 
                 return;
             }
 
 
-            // Values from ORIGINAL line being removed
+            const clm = clmResults[0];
+
             const clmLineKey = String(
-                clmResults[0].getValue({
+                clm.getValue({
                     name: 'lineuniquekey'
                 }) || ''
             );
 
-            const clmAssignedId = clmResults[0].getValue({
+            const clmAssignedId = clm.getValue({
                 name: 'custcolassigned_id'
             });
 
-            const clmPo107 = clmResults[0].getValue({
+            const clmPo107 = clm.getValue({
                 name: 'custcolproductserviceid_po107'
-            });
-
-
-            log.debug('Original CLM_EB', {
-                item: clmResults[0].getValue({
-                    name: 'item'
-                }),
-
-                line: clmResults[0].getValue({
-                    name: 'line'
-                }),
-
-                lineKey: clmLineKey,
-                assignedId: clmAssignedId,
-                po107: clmPo107
             });
 
 
             // =====================================================
             // SEARCH 2
-            // Get all other SO item lines
+            // GET ALL OTHER SO ITEM LINES
             // =====================================================
             const lines = [];
 
+
             search.create({
+
                 type: search.Type.SALES_ORDER,
 
                 filters: [
+
                     ['internalid', 'anyof', soId],
+
                     'AND',
                     ['mainline', 'is', 'F'],
+
                     'AND',
                     ['taxline', 'is', 'F'],
+
                     'AND',
                     ['cogs', 'is', 'F'],
+
                     'AND',
                     ['shipping', 'is', 'F']
                 ],
 
                 columns: [
+
                     'item',
                     'line',
                     'lineuniquekey',
@@ -141,11 +286,13 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
 
             }).run().each(result => {
 
+
                 const itemId = String(
                     result.getValue({
                         name: 'item'
                     }) || ''
                 );
+
 
                 const lineKey = String(
                     result.getValue({
@@ -153,148 +300,71 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                     }) || ''
                 );
 
-                const itemType = result.getValue({
-                    name: 'type',
-                    join: 'item'
-                });
 
-
-                // Skip original CLM_EB line
+                // Original line being removed
                 if (lineKey === clmLineKey) return true;
 
-                // Skip markup item if already there
+
+                // Existing/new markup lines
                 if (itemId === MARKUP_ITEM) return true;
 
 
                 lines.push({
+
                     itemId,
-                    itemType,
+
+                    itemType: result.getValue({
+                        name: 'type',
+                        join: 'item'
+                    }),
+
                     line: result.getValue({
                         name: 'line'
                     }),
+
                     lineKey
                 });
+
 
                 return true;
             });
 
 
-            log.debug('SO Lines Found', {
-                count: lines.length,
-                lines
-            });
-
-
-            if (!lines.length) {
-                log.audit('STOP', 'No item lines found');
-                return;
-            }
+            if (!lines.length) return;
 
 
             // =====================================================
-            // GET UNIQUE ASSEMBLY ITEM IDs
-            // No Item record.load()
+            // SUITEQL - CHECK ITEM OPTIONS
             // =====================================================
-            const itemIds = [
-                ...new Set(
-                    lines
-                        .filter(x => x.itemType === 'Assembly')
-                        .map(x => Number(x.itemId))
-                        .filter(Boolean)
-                )
-            ];
+            const edgeItems = getEdgeItems(lines);
 
 
-            log.debug('Unique Assembly Items', {
-                count: itemIds.length,
-                itemIds
-            });
-
-
-            if (!itemIds.length) {
-                log.audit('STOP', 'No Assembly items found');
-                return;
-            }
-
-
-            // =====================================================
-            // ONE SUITEQL QUERY
-            // Get itemoptions for ALL items together
-            // =====================================================
-            const placeholders = itemIds.map(() => '?').join(',');
-
-            const sql = `
-                SELECT
-                    id,
-                    itemoptions
-                FROM
-                    assemblyitem
-                WHERE
-                    id IN (${placeholders})
-            `;
-
-
-            const itemResults = query.runSuiteQL({
-                query: sql,
-                params: itemIds
-            }).asMappedResults();
-
-
-            log.debug('SuiteQL Item Options', {
-                count: itemResults.length,
-                results: itemResults
-            });
-
-
-            // =====================================================
-            // BUILD ELIGIBLE ITEM MAP
-            // =====================================================
-            const edgeItems = {};
-
-            itemResults.forEach(row => {
-
-                const options = String(
-                    row.itemoptions || ''
-                ).toUpperCase();
-
-                const hasEdgeBand =
-                    options.indexOf(EDGE_OPTION) !== -1;
-
-                edgeItems[String(row.id)] = hasEdgeBand;
-
-                log.debug('Edge Band Check', {
-                    item: row.id,
-                    options: row.itemoptions,
-                    eligible: hasEdgeBand
-                });
-            });
-
-
-            // =====================================================
-            // GET ELIGIBLE SO LINES
-            // =====================================================
-            const eligible = lines.filter(line =>
-                edgeItems[line.itemId] === true
+            const eligible = lines.filter(
+                line => edgeItems[line.itemId] === true
             );
 
 
-            log.audit('Eligible Items', {
-                count: eligible.length,
-                items: eligible
-            });
-
-
             if (!eligible.length) {
-                log.audit(
-                    'STOP',
-                    'No Edge Band eligible items found'
-                );
+
+                log.audit('STOP', {
+                    salesOrder: soId,
+                    reason: 'No Edge Band eligible items'
+                });
+
                 return;
             }
 
 
+            log.audit('PROCESS', {
+                salesOrder: soId,
+                eligibleLines: eligible.length,
+                assignedId: clmAssignedId,
+                po107: clmPo107
+            });
+
+
             // =====================================================
-            // LOAD SALES ORDER ONCE
+            // ONLY RECORD LOAD IN THE SCRIPT
             // =====================================================
             const so = record.load({
                 type: record.Type.SALES_ORDER,
@@ -304,40 +374,33 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
 
 
             // =====================================================
-            // ADD MARKUP ITEM BELOW EACH ELIGIBLE ITEM
+            // ADD 306264 UNDER EACH EDGE BAND ITEM
             // =====================================================
             eligible.forEach(line => {
 
+
                 const sourceLine =
                     so.findSublistLineWithValue({
+
                         sublistId: 'item',
                         fieldId: 'lineuniquekey',
                         value: line.lineKey
+
                     });
 
 
-                if (sourceLine === -1) {
-
-                    log.error('Source Line Not Found', {
-                        item: line.itemId,
-                        lineKey: line.lineKey
-                    });
-
-                    return;
-                }
+                if (sourceLine === -1) return;
 
 
                 const newLine = sourceLine + 1;
 
 
-                // Insert directly below eligible item
                 so.insertLine({
                     sublistId: 'item',
                     line: newLine
                 });
 
 
-                // Add markup item 306264
                 so.setSublistValue({
                     sublistId: 'item',
                     fieldId: 'item',
@@ -346,7 +409,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                 });
 
 
-                // PO107 FROM ORIGINAL CLM_EB LINE
+                // PO107 FROM ORIGINAL REMOVED LINE
                 if (clmPo107) {
 
                     so.setSublistValue({
@@ -358,7 +421,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                 }
 
 
-                // ASSIGNED ID FROM ORIGINAL CLM_EB LINE
+                // ASSIGNED ID FROM ORIGINAL REMOVED LINE
                 if (clmAssignedId) {
 
                     so.setSublistValue({
@@ -369,15 +432,6 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
                     });
                 }
 
-
-                log.audit('Markup Added', {
-                    sourceItem: line.itemId,
-                    sourceLine: line.line,
-                    markupItem: MARKUP_ITEM,
-                    assignedId: clmAssignedId,
-                    po107: clmPo107
-                });
-
             });
 
 
@@ -386,20 +440,16 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             // =====================================================
             const clmPosition =
                 so.findSublistLineWithValue({
+
                     sublistId: 'item',
                     fieldId: 'lineuniquekey',
                     value: clmLineKey
+
                 });
 
 
             if (clmPosition === -1) {
-
-                log.error(
-                    'CLM_EB Remove Failed',
-                    'Original CLM_EB line not found'
-                );
-
-                return;
+                throw Error('Original CLM_EB line not found');
             }
 
 
@@ -409,38 +459,29 @@ define(['N/search', 'N/record', 'N/query', 'N/log'],
             });
 
 
-            log.audit('Original CLM_EB Removed', {
-                lineKey: clmLineKey,
-                assignedId: clmAssignedId,
-                po107: clmPo107
-            });
-
-
             // =====================================================
-            // SAVE SALES ORDER ONCE
+            // SAVE ONCE
             // =====================================================
-            const savedId = so.save({
+            so.save({
                 enableSourcing: true,
                 ignoreMandatoryFields: false
             });
 
 
             log.audit('SUCCESS', {
-                salesOrder: savedId,
-                totalSOLines: lines.length,
-                uniqueItemsChecked: itemIds.length,
+                salesOrder: soId,
                 markupLinesAdded: eligible.length,
-                assignedIdCopied: clmAssignedId,
-                po107Copied: clmPo107
+                assignedId: clmAssignedId,
+                po107: clmPo107
             });
 
 
         } catch (e) {
 
-            log.error('EDGE BAND SCRIPT ERROR', {
+            log.error('EDGE BAND ERROR', {
+                salesOrder: context.newRecord.id,
                 name: e.name,
-                message: e.message,
-                stack: e.stack
+                message: e.message
             });
         }
     };
