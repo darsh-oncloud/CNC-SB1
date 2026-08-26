@@ -4,9 +4,12 @@
  *
  * SALES ORDER - EDGE BAND MARKUP
  *
- * 1 CLM_EB line on the SO  ->  add markup item 306264 under every item
- * that has Item Option CUSTCOL_YY_MOD_EDGEBAND (internal id 9097),
- * copy PO107 + Assigned ID from the CLM_EB line, then delete the CLM_EB line.
+ * 1 CLM_EB line on the SO  ->  for every item that has Item Option
+ * CUSTCOL_YY_MOD_EDGEBAND (internal id 9097):
+ *      set Edge Band = Yes on that line
+ *      add markup item 306264 directly under it with PO107 + Assigned ID
+ *      copied from the CLM_EB line
+ * then delete the CLM_EB line. Non-eligible lines are never touched.
  *
  * Runs on CREATE and EDIT. No loop: after the CLM_EB line is removed
  * SEARCH 1 returns 0 rows and the script exits immediately.
@@ -17,6 +20,8 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
     const CLM_ITEM    = '429828';      // placeholder item that carries CLM_EB from EDI
     const MARKUP_ITEM = '306264';
     const EDGE_OPTION = '9097';        // CUSTCOL_YY_MOD_EDGEBAND internal id
+    const EDGE_FIELD  = 'custcol_yy_mod_edgeband';   // same option, script id
+    const EDGE_VALUE  = 'Yes';         // dropdown text set on the eligible line
 
     // itemoptions is not searchable -> read it with SuiteQL.
     // Loop stops as soon as every item id has been found.
@@ -136,17 +141,17 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
             }
 
 
-            // 1 LOAD
+            // 1 LOAD - dynamic is required, item options cannot be written in standard mode
             const so = record.load({
                 type: record.Type.SALES_ORDER,
                 id: soId,
-                isDynamic: false
+                isDynamic: true
             });
 
-            // add 306264 under each eligible line (markup item takes its % from the line above)
             eligible.forEach(l => {
 
-                const src = so.findSublistLineWithValue({
+                // ---- 1. main line: set Edge Band = Yes
+                let src = so.findSublistLineWithValue({
                     sublistId: 'item',
                     fieldId: 'lineuniquekey',
                     value: l.lineKey
@@ -154,28 +159,46 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
 
                 if (src === -1) return;
 
-                const n = src + 1;
+                so.selectLine({ sublistId: 'item', line: src });
 
-                so.insertLine({ sublistId: 'item', line: n });
-                so.setSublistValue({ sublistId: 'item', fieldId: 'item', line: n, value: MARKUP_ITEM });
+                so.setCurrentSublistText({
+                    sublistId: 'item',
+                    fieldId: EDGE_FIELD,
+                    text: EDGE_VALUE,
+                    ignoreFieldChange: true
+                });
+
+                so.commitLine({ sublistId: 'item' });
+
+
+                // ---- 2. markup line right under it (markup % comes from the line above)
+                src = so.findSublistLineWithValue({
+                    sublistId: 'item',
+                    fieldId: 'lineuniquekey',
+                    value: l.lineKey
+                });
+
+                so.insertLine({ sublistId: 'item', line: src + 1 });
+
+                so.setCurrentSublistValue({ sublistId: 'item', fieldId: 'item', value: MARKUP_ITEM });
 
                 if (po107) {
-                    so.setSublistValue({
+                    so.setCurrentSublistValue({
                         sublistId: 'item',
                         fieldId: 'custcolproductserviceid_po107',
-                        line: n,
                         value: po107
                     });
                 }
 
                 if (assigned) {
-                    so.setSublistValue({
+                    so.setCurrentSublistValue({
                         sublistId: 'item',
                         fieldId: 'custcolassigned_id',
-                        line: n,
                         value: assigned
                     });
                 }
+
+                so.commitLine({ sublistId: 'item' });
             });
 
             // remove the original CLM_EB line
