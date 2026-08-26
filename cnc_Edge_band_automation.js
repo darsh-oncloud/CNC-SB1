@@ -2,26 +2,30 @@
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  *
- * SALES ORDER - EDGE BAND MARKUP
+ * SALES ORDER - EDGE BAND AUTOMATION
  *
- * 1 CLM_EB line on the SO  ->  for every item that has Item Option
- * CUSTCOL_YY_MOD_EDGEBAND (internal id 9097):
+ * Trigger line = item 429828 AND PO107 = CLM_EB (both required).
+ * For every OTHER line whose item carries Item Option 9097 (CUSTCOL_YY_MOD_EDGEBAND):
  *      set Edge Band = Yes on that line
- *      add markup item 306264 directly under it with PO107 + Assigned ID
- *      copied from the CLM_EB line
- * then delete the CLM_EB line. Non-eligible lines are never touched.
+ *      insert markup item 306264 directly under it,
+ *      copying PO107 + Assigned ID from the trigger line
+ * Then delete the trigger line.
  *
- * Runs on CREATE and EDIT. No loop: after the CLM_EB line is removed
- * SEARCH 1 returns 0 rows and the script exits immediately.
+ * Non-eligible lines are never touched.
+ * Runs on CREATE and EDIT. After the trigger line is gone SEARCH 1 returns
+ * 0 rows, so a re-save exits before the record load - nothing is added twice
+ * and nothing is deleted.
+ *
+ * 1 record.load() + 1 save() per execution. No item loads.
  */
 define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log) => {
 
     const CUSTOMER    = '161136';
-    const CLM_ITEM    = '429828';      // placeholder item that carries CLM_EB from EDI
-    const MARKUP_ITEM = '306264';
-    const EDGE_OPTION = '9097';        // CUSTCOL_YY_MOD_EDGEBAND internal id
-    const EDGE_FIELD  = 'custcol_yy_mod_edgeband';   // same option, script id
-    const EDGE_VALUE  = 'Yes';         // dropdown text set on the eligible line
+    const CLM_ITEM    = '429828';                    // placeholder item carrying CLM_EB from EDI
+    const MARKUP_ITEM = '306264';                    // CT-EDGEBAND 10%
+    const EDGE_OPTION = '9097';                      // item option internal id (SuiteQL side)
+    const EDGE_FIELD  = 'custcol_yy_mod_edgeband';   // item option script id (line side)
+    const EDGE_VALUE  = 'Yes';                       // value written on the eligible line
 
     // itemoptions is not searchable -> read it with SuiteQL.
     // Loop stops as soon as every item id has been found.
@@ -48,16 +52,14 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                     query: `SELECT id, itemoptions FROM ${table} WHERE id IN (${left.join(',')})`
                 }).asMappedResults().forEach(row => {
 
-                    const options = String(row.itemoptions || '')
-                        .split(',')
-                        .map(v => v.trim());
+                    const options = String(row.itemoptions || '').split(',').map(v => v.trim());
 
                     if (options.indexOf(EDGE_OPTION) > -1) edge[String(row.id)] = true;
 
                     left = left.filter(id => id !== Number(row.id));
                 });
             } catch (e) {
-                // table/feature not enabled in this account - keep going
+                // table / feature not enabled in this account - keep going
             }
         });
 
@@ -79,10 +81,11 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
             if (String(context.newRecord.getValue('entity')) !== CUSTOMER) return;
 
 
-            // SEARCH 1 - the trigger line = item 429828 AND PO107 = CLM_EB.
-            // BOTH conditions required. A line that only carries CLM_EB in the column
-            // field (including the 306264 markup lines added by this script) is never
-            // a trigger, so a re-save can never delete them.
+            // =========================================================
+            // SEARCH 1 - trigger line: item 429828 AND PO107 = CLM_EB
+            // =========================================================
+            step = 'search trigger line';
+
             const clm = search.create({
                 type: search.Type.SALES_ORDER,
                 filters: [
@@ -100,12 +103,16 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
             // 0 = nothing to do / already processed, 2+ = do not run
             if (clm.length !== 1) return;
 
-            const clmKey    = String(clm[0].getValue('lineuniquekey'));
-            const assigned  = clm[0].getValue('custcolassigned_id');
-            const po107     = clm[0].getValue('custcolproductserviceid_po107');
+            const clmKey   = String(clm[0].getValue('lineuniquekey'));
+            const assigned = clm[0].getValue('custcolassigned_id');
+            const po107    = clm[0].getValue('custcolproductserviceid_po107');
 
 
-            // SEARCH 2 - all other item lines
+            // =========================================================
+            // SEARCH 2 - candidate lines
+            // =========================================================
+            step = 'search order lines';
+
             const lines = [];
 
             search.create({
@@ -123,7 +130,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                 const itemId  = String(r.getValue('item') || '');
                 const lineKey = String(r.getValue('lineuniquekey') || '');
 
-                // never a candidate: the trigger line, other placeholder lines, markup lines
+                // never a candidate: trigger line, other placeholder lines, markup lines
                 if (lineKey !== clmKey && itemId !== MARKUP_ITEM && itemId !== CLM_ITEM) {
                     lines.push({ itemId, lineKey });
                 }
@@ -133,7 +140,11 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
             if (!lines.length) return;
 
 
-            // SuiteQL - which of those items carry the edge band option
+            // =========================================================
+            // SUITEQL - which items carry the edge band option
+            // =========================================================
+            step = 'suiteql item options';
+
             const edge = getEdgeItems([...new Set(lines.map(l => Number(l.itemId)))]);
             const eligible = lines.filter(l => edge[l.itemId]);
 
@@ -143,7 +154,10 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
             }
 
 
-            // 1 LOAD - dynamic is required, item options cannot be written in standard mode
+            // =========================================================
+            // LOAD - dynamic required, item options are not writable
+            //        in standard mode
+            // =========================================================
             step = 'load';
 
             const so = record.load({
@@ -152,9 +166,10 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                 isDynamic: true
             });
 
+
             eligible.forEach(l => {
 
-                // ---- 1. main line: set Edge Band = Yes
+                // ---- 1. main line: Edge Band = Yes
                 let src = so.findSublistLineWithValue({
                     sublistId: 'item',
                     fieldId: 'lineuniquekey',
@@ -166,19 +181,38 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                 step = 'selectLine ' + src + ' item ' + l.itemId;
                 so.selectLine({ sublistId: 'item', line: src });
 
-                step = 'set ' + EDGE_FIELD + ' on line ' + src;
-                so.setCurrentSublistText({
-                    sublistId: 'item',
-                    fieldId: EDGE_FIELD,
-                    text: EDGE_VALUE,
-                    ignoreFieldChange: true
-                });
+                step = 'set edge band on line ' + src;
+
+                try {
+                    so.setCurrentSublistValue({
+                        sublistId: 'item',
+                        fieldId: EDGE_FIELD,
+                        value: EDGE_VALUE,
+                        ignoreFieldChange: true
+                    });
+                } catch (optErr) {
+
+                    // never kill the run - log what the line actually holds
+                    let raw = '';
+                    try {
+                        raw = so.getCurrentSublistValue({ sublistId: 'item', fieldId: 'options' });
+                    } catch (ignore) { raw = 'options not readable'; }
+
+                    log.error('EDGE OPTION SET FAILED', {
+                        line: src,
+                        item: l.itemId,
+                        field: EDGE_FIELD,
+                        value: EDGE_VALUE,
+                        rawOptions: raw,
+                        message: optErr.message
+                    });
+                }
 
                 step = 'commit main line ' + src;
                 so.commitLine({ sublistId: 'item' });
 
 
-                // ---- 2. markup line right under it (markup % comes from the line above)
+                // ---- 2. markup line directly under it
                 src = so.findSublistLineWithValue({
                     sublistId: 'item',
                     fieldId: 'lineuniquekey',
@@ -211,21 +245,29 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                 so.commitLine({ sublistId: 'item' });
             });
 
-            // remove the original CLM_EB line
+
+            // =========================================================
+            // REMOVE TRIGGER LINE + SAVE
+            // =========================================================
+            step = 'removeLine';
+
             const pos = so.findSublistLineWithValue({
                 sublistId: 'item',
                 fieldId: 'lineuniquekey',
                 value: clmKey
             });
 
-            step = 'removeLine';
             if (pos > -1) so.removeLine({ sublistId: 'item', line: pos });
 
-            // 1 SAVE
             step = 'save';
             so.save({ enableSourcing: true, ignoreMandatoryFields: false });
 
-            log.audit('SUCCESS', { so: soId, markupLines: eligible.length, po107, assigned });
+            log.audit('SUCCESS', {
+                so: soId,
+                markupLines: eligible.length,
+                po107,
+                assigned
+            });
 
         } catch (e) {
             log.error('SO EDGE BAND ERROR', {
