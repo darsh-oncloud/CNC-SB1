@@ -189,7 +189,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                     so.setSublistValue({
                         sublistId: 'item', fieldId: 'description', line: n, value: 'Sales Order Total: ' + originalTotal.toFixed(2)
                     });
-                }                            
+                                            
             });
 
 
