@@ -69,6 +69,10 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
             const soId = context.newRecord.id;
             if (String(context.newRecord.getValue('entity')) !== CUSTOMER) return;
 
+            const originalTotal = Number(
+                String(context.newRecord.getValue('total') || 0).replace(/,/g, '')
+            );
+
 
             // SEARCH 1 - trigger line: 429828 + CLM_EB
             const clm = search.create({
@@ -77,7 +81,7 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                     'AND', ['item', 'anyof', CLM_ITEM],
                     'AND', ['custcolproductserviceid_po107', 'is', 'CLM_EB']
                 ]),
-                columns: ['lineuniquekey', 'custcolassigned_id', 'custcolproductserviceid_po107']
+                columns: ['lineuniquekey', 'custcolassigned_id', 'custcolproductserviceid_po107', 'custcol_product_service_id', 'custcol_edi_unit', 'custcol_ka_po_line_id']
             }).run().getRange({ start: 0, end: 2 });
 
             if (clm.length !== 1) return;
@@ -85,6 +89,9 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
             const clmKey   = String(clm[0].getValue('lineuniquekey'));
             const assigned = clm[0].getValue('custcolassigned_id');
             const po107    = clm[0].getValue('custcolproductserviceid_po107');
+            const productServiceId = clm[0].getValue('custcol_product_service_id');
+            const ediUnit          = clm[0].getValue('custcol_edi_unit');
+            const poLineId         = clm[0].getValue('custcol_ka_po_line_id');
 
 
             // SEARCH 2 - candidate lines
@@ -160,6 +167,29 @@ define(['N/search', 'N/record', 'N/query', 'N/log'], (search, record, query, log
                         sublistId: 'item', fieldId: 'custcolassigned_id', line: n, value: assigned
                     });
                 }
+
+                if (productServiceId) {
+                    so.setSublistValue({
+                        sublistId: 'item', fieldId: 'custcol_product_service_id', line: n, value: productServiceId
+                    });
+                }
+
+                if (ediUnit) {
+                    so.setSublistValue({
+                        sublistId: 'item', fieldId: 'custcol_edi_unit', line: n, value: ediUnit
+                    });
+                }
+
+                if (poLineId) {
+                    so.setSublistValue({
+                        sublistId: 'item', fieldId: 'custcol_ka_po_line_id', line: n, value: poLineId
+                    });
+                }  
+
+                    so.setSublistValue({
+                        sublistId: 'item', fieldId: 'description', line: n, value: 'Sales Order Total: ' + originalTotal.toFixed(2)
+                    });
+                }                            
             });
 
 
