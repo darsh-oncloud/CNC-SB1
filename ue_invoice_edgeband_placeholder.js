@@ -49,6 +49,7 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
             // 306264 + CLM_EB lines
             // -----------------------------------------------------
             const lines = [];
+            let placeholderExists = false;
 
             search.create({
                 type: search.Type.INVOICE,
@@ -58,11 +59,11 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                     ['taxline', 'is', 'F'], 'AND',
                     ['cogs', 'is', 'F'], 'AND',
                     ['shipping', 'is', 'F'], 'AND',
-                    ['item', 'anyof', MARKUP_ITEM], 'AND',
+                    ['item', 'anyof', [MARKUP_ITEM, PLACEHOLDER]], 'AND',
                     ['custcolproductserviceid_po107', 'is', 'CLM_EB']
                 ],
                 columns: [
-                    'lineuniquekey', 'amount',
+                    'item', 'lineuniquekey', 'amount',
                     'custcolproductserviceid_po107', 'custcolassigned_id',
                     BOOMI_FIELD
                 ]
@@ -70,6 +71,12 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
 
                 const po107    = String(r.getValue('custcolproductserviceid_po107') || '');
                 const assigned = String(r.getValue('custcolassigned_id') || '');
+
+                // placeholder already on the invoice = already processed
+                if (String(r.getValue('item') || '') === PLACEHOLDER) {
+                    placeholderExists = true;
+                    return true;
+                }
 
                 if (!assigned) return true;
 
@@ -85,6 +92,11 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                 return true;
             });
 
+            if (placeholderExists) {
+                log.audit('STOP', { invoice: invId, reason: 'Placeholder line already exists' });
+                return;
+            }
+
             if (!lines.length) return;
 
 
@@ -99,10 +111,6 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                 });
                 return;
             }
-
-            // already processed - every markup line is at 0
-            if (lines.every(l => l.amount === 0)) return;
-
 
             // -----------------------------------------------------
             // SO total captured BEFORE the field is cleared
