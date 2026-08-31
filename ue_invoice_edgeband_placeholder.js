@@ -35,7 +35,14 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
             const invId = context.newRecord.id;
             if (String(context.newRecord.getValue('entity')) !== CUSTOMER) return;
 
-            const invoiceTotal = toAmount(context.newRecord.getValue('total'));
+            // committed total - read from the saved record, not the submit snapshot
+            const invoiceTotal = toAmount(
+                search.lookupFields({
+                    type: search.Type.INVOICE,
+                    id: invId,
+                    columns: ['total']
+                }).total
+            );
 
 
             // -----------------------------------------------------
@@ -103,20 +110,35 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
             const soLine  = lines.filter(l => l.boomi)[0];
             const soTotal = soLine ? toAmount(soLine.boomi) : 0;
 
-            const totalAmount = lines.reduce((t, l) => t + l.amount, 0);
+            const markupSum = lines.reduce((t, l) => t + l.amount, 0);
 
-            const matched = soTotal > 0 &&
-                Math.abs(invoiceTotal - soTotal) <= TOLERANCE;
+            // invoice total once every markup line is set to 0
+            const baseTotal = invoiceTotal - markupSum;
+
+            // placeholder amount that makes the invoice total equal the SO total
+            let totalAmount = soTotal > 0
+                ? Number((soTotal - baseTotal).toFixed(2))
+                : markupSum;
+
+            // never write a negative charge - fall back to the plain sum
+            if (totalAmount < 0) {
+                log.error('NEGATIVE PLACEHOLDER', {
+                    invoice: invId, soTotal, invoiceTotal, markupSum, calculated: totalAmount
+                });
+                totalAmount = markupSum;
+            }
+
+            const matched = Math.abs(totalAmount - markupSum) <= TOLERANCE;
 
             const note = 'Sales Order Total: ' + soTotal.toFixed(2) +
                 ' | Invoice Total: ' + invoiceTotal.toFixed(2) +
                 (soTotal > 0
-                    ? (matched ? ' | MATCHED' : ' | NOT MATCHED')
+                    ? (matched ? ' | MATCHED' : ' | ADJUSTED to ' + totalAmount.toFixed(2))
                     : ' | NO SO TOTAL FOUND');
 
             if (!matched) {
-                log.audit('TOTAL MISMATCH', {
-                    invoice: invId, soTotal, invoiceTotal
+                log.audit('TOTAL ADJUSTED', {
+                    invoice: invId, soTotal, invoiceTotal, markupSum, placeholder: totalAmount
                 });
             }
 
@@ -177,7 +199,8 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
             log.audit('SUCCESS', {
                 invoice: invId,
                 markupLines: lines.length,
-                amount: totalAmount,
+                markupSum,
+                placeholder: totalAmount,
                 soTotal,
                 invoiceTotal,
                 matched,
