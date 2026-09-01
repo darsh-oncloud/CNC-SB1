@@ -7,7 +7,8 @@
  * 1. Find 306264 + CLM_EB lines.
  * 2. Only ONE unique Item + PO107 + Assigned ID key allowed, else stop.
  * 3. Read the SO total out of custcol_boomi_edi_item_details BEFORE clearing it.
- * 4. Set every matching 306264 line rate = 0 and blank its Boomi field.
+ * 4. Set every matching 306264 line rate = 0 and write its old amount into
+ *    the Boomi field.
  * 5. Sum the old amounts, add one 429828 placeholder line with that total.
  * 6. Compare invoice total against the SO total and note the result in the
  *    Boomi field on the new line.
@@ -175,7 +176,11 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                 if (src === -1) return;
 
                 inv.setSublistValue({ sublistId: 'item', fieldId: 'rate', line: src, value: 0 });
-                inv.setSublistValue({ sublistId: 'item', fieldId: BOOMI_FIELD, line: src, value: '' });
+
+                // keep the original amount visible on the zeroed line
+                inv.setSublistValue({
+                    sublistId: 'item', fieldId: BOOMI_FIELD, line: src, value: l.amount.toFixed(2)
+                });
             });
 
 
