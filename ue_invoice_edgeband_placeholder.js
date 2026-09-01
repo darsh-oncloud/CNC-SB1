@@ -4,15 +4,12 @@
  *
  * INVOICE - EDGE BAND PLACEHOLDER
  *
- * 1. Find 306264 + CLM_EB lines.
- * 2. Only ONE unique Assigned ID allowed across those lines, else stop.
- *    Lines with a blank Assigned ID belong to the group.
- * 3. Read the SO total out of custcol_boomi_edi_item_details BEFORE clearing it.
- * 4. Set every matching 306264 line rate = 0 and write its old amount into
- *    the Boomi field.
- * 5. Sum the old amounts, add one 429828 placeholder line with that total.
- * 6. Compare invoice total against the SO total and note the result in the
- *    Boomi field on the new line.
+ * Lines = item 306264 + PO107 CLM_EB.
+ * All of them must share ONE Assigned ID and none may be blank, else stop.
+ *
+ * Then: read the SO total from the Boomi field, set every line rate = 0 and
+ * put its old amount in the Boomi field, and add one 429828 placeholder whose
+ * amount brings the invoice total back to the SO total.
  *
  * 1 search + 1 load + 1 save.
  */
@@ -22,9 +19,8 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
     const MARKUP_ITEM = '306264';
     const PLACEHOLDER = '429828';
     const BOOMI_FIELD = 'custcol_boomi_edi_item_details';
-    const TOLERANCE   = 0.01;      // rounding allowance on the total comparison
+    const TOLERANCE   = 0.01;
 
-    // pull the number out of "Sales Order Total: 1234.56"
     const toAmount = (v) => Number(String(v || '').replace(/[^0-9.\-]/g, '')) || 0;
 
     const afterSubmit = (context) => {
@@ -37,21 +33,12 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
             const invId = context.newRecord.id;
             if (String(context.newRecord.getValue('entity')) !== CUSTOMER) return;
 
-            // committed total - read from the saved record, not the submit snapshot
-            const invoiceTotal = toAmount(
-                search.lookupFields({
-                    type: search.Type.INVOICE,
-                    id: invId,
-                    columns: ['total']
-                }).total
-            );
-
 
             // -----------------------------------------------------
-            // 306264 + CLM_EB lines
+            // 306264 + CLM_EB lines (placeholder included, to detect a re-run)
             // -----------------------------------------------------
             const lines = [];
-            let placeholderExists = false;
+            let done = false;
 
             search.create({
                 type: search.Type.INVOICE,
@@ -66,17 +53,12 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                 ],
                 columns: [
                     'item', 'lineuniquekey', 'amount',
-                    'custcolproductserviceid_po107', 'custcolassigned_id',
-                    BOOMI_FIELD
+                    'custcolassigned_id', BOOMI_FIELD
                 ]
             }).run().each(r => {
 
-                const po107    = String(r.getValue('custcolproductserviceid_po107') || '');
-                const assigned = String(r.getValue('custcolassigned_id') || '');
-
-                // placeholder already on the invoice = already processed
                 if (String(r.getValue('item') || '') === PLACEHOLDER) {
-                    placeholderExists = true;
+                    done = true;
                     return true;
                 }
 
@@ -84,149 +66,116 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                     lineKey: String(r.getValue('lineuniquekey') || ''),
                     amount: toAmount(r.getValue('amount')),
                     boomi: String(r.getValue(BOOMI_FIELD) || ''),
-                    po107,
-                    assigned
+                    assigned: String(r.getValue('custcolassigned_id') || '')
                 });
 
                 return true;
             });
 
-            if (placeholderExists) {
-                log.audit('STOP', { invoice: invId, reason: 'Placeholder line already exists' });
+            if (done) {
+                log.audit('STOP', { invoice: invId, reason: 'Placeholder already exists' });
                 return;
             }
 
             if (!lines.length) return;
 
 
-            // Assigned ID decides whether this is one charge or several.
-            // Blank Assigned ID lines belong to the group and are not counted.
-            const uniqueKeys = [...new Set(
-                lines.filter(l => l.assigned).map(l => l.po107 + '|' + l.assigned)
-            )];
+            // -----------------------------------------------------
+            // One Assigned ID for all lines, none blank
+            // -----------------------------------------------------
+            const ids = [...new Set(lines.map(l => l.assigned))];
 
-            if (uniqueKeys.length > 1) {
+            if (ids.length !== 1 || !ids[0]) {
                 log.audit('STOP', {
                     invoice: invId,
-                    reason: 'More than one unique Edge Band key',
-                    keys: uniqueKeys
+                    reason: 'Assigned ID is blank or not the same on all lines',
+                    ids
                 });
                 return;
             }
 
-            // -----------------------------------------------------
-            // SO total captured BEFORE the field is cleared
-            // -----------------------------------------------------
-            const soLine  = lines.filter(l => l.boomi)[0];
-            const soTotal = soLine ? toAmount(soLine.boomi) : 0;
+            const assigned = ids[0];
 
+
+            // -----------------------------------------------------
+            // Amounts
+            // -----------------------------------------------------
+            const invoiceTotal = toAmount(
+                search.lookupFields({
+                    type: search.Type.INVOICE, id: invId, columns: ['total']
+                }).total
+            );
+
+            const soLine    = lines.filter(l => l.boomi)[0];
+            const soTotal   = soLine ? toAmount(soLine.boomi) : 0;
             const markupSum = lines.reduce((t, l) => t + l.amount, 0);
 
-            // invoice total once every markup line is set to 0
-            const baseTotal = invoiceTotal - markupSum;
-
-            // placeholder amount that makes the invoice total equal the SO total
-            let totalAmount = soTotal > 0
-                ? Number((soTotal - baseTotal).toFixed(2))
+            // amount that puts the invoice total back on the SO total
+            let amount = soTotal > 0
+                ? Number((soTotal - (invoiceTotal - markupSum)).toFixed(2))
                 : markupSum;
 
-            // never write a negative charge - fall back to the plain sum
-            if (totalAmount < 0) {
-                log.error('NEGATIVE PLACEHOLDER', {
-                    invoice: invId, soTotal, invoiceTotal, markupSum, calculated: totalAmount
-                });
-                totalAmount = markupSum;
+            if (amount < 0) {
+                log.error('NEGATIVE PLACEHOLDER', { invoice: invId, soTotal, invoiceTotal, markupSum });
+                amount = markupSum;
             }
 
-            const matched = Math.abs(totalAmount - markupSum) <= TOLERANCE;
+            const matched = Math.abs(amount - markupSum) <= TOLERANCE;
 
             const note = 'Sales Order Total: ' + soTotal.toFixed(2) +
                 ' | Invoice Total: ' + invoiceTotal.toFixed(2) +
                 (soTotal > 0
-                    ? (matched ? ' | MATCHED' : ' | ADJUSTED to ' + totalAmount.toFixed(2))
+                    ? (matched ? ' | MATCHED' : ' | ADJUSTED to ' + amount.toFixed(2))
                     : ' | NO SO TOTAL FOUND');
-
-            if (!matched) {
-                log.audit('TOTAL ADJUSTED', {
-                    invoice: invId, soTotal, invoiceTotal, markupSum, placeholder: totalAmount
-                });
-            }
-
-            const po107     = lines[0].po107;
-            const withId    = lines.filter(l => l.assigned)[0];
-            const assigned  = withId ? withId.assigned : '';
 
 
             // -----------------------------------------------------
             // 1 LOAD
             // -----------------------------------------------------
             const inv = record.load({
-                type: record.Type.INVOICE,
-                id: invId,
-                isDynamic: false
+                type: record.Type.INVOICE, id: invId, isDynamic: false
             });
 
-            // rate 0 + clear the Boomi field on every matching line
             lines.forEach(l => {
 
                 const src = inv.findSublistLineWithValue({
-                    sublistId: 'item',
-                    fieldId: 'lineuniquekey',
-                    value: l.lineKey
+                    sublistId: 'item', fieldId: 'lineuniquekey', value: l.lineKey
                 });
 
                 if (src === -1) return;
 
                 inv.setSublistValue({ sublistId: 'item', fieldId: 'rate', line: src, value: 0 });
 
-                // keep the original amount visible on the zeroed line
                 inv.setSublistValue({
                     sublistId: 'item', fieldId: BOOMI_FIELD, line: src, value: l.amount.toFixed(2)
                 });
             });
 
-
-            // one placeholder line with the combined amount
             const n = inv.getLineCount({ sublistId: 'item' });
 
             inv.insertLine({ sublistId: 'item', line: n });
-
             inv.setSublistValue({ sublistId: 'item', fieldId: 'item', line: n, value: PLACEHOLDER });
             inv.setSublistValue({ sublistId: 'item', fieldId: 'quantity', line: n, value: 1 });
-            inv.setSublistValue({ sublistId: 'item', fieldId: 'rate', line: n, value: totalAmount });
-
+            inv.setSublistValue({ sublistId: 'item', fieldId: 'rate', line: n, value: amount });
             inv.setSublistValue({
-                sublistId: 'item', fieldId: 'custcolproductserviceid_po107', line: n, value: po107
+                sublistId: 'item', fieldId: 'custcolproductserviceid_po107', line: n, value: 'CLM_EB'
             });
-
             inv.setSublistValue({
                 sublistId: 'item', fieldId: 'custcolassigned_id', line: n, value: assigned
             });
-
-            inv.setSublistValue({
-                sublistId: 'item', fieldId: BOOMI_FIELD, line: n, value: note
-            });
-
+            inv.setSublistValue({ sublistId: 'item', fieldId: BOOMI_FIELD, line: n, value: note });
 
             // 1 SAVE
             inv.save({ enableSourcing: true, ignoreMandatoryFields: false });
 
             log.audit('SUCCESS', {
-                invoice: invId,
-                markupLines: lines.length,
-                markupSum,
-                placeholder: totalAmount,
-                soTotal,
-                invoiceTotal,
-                matched,
-                po107,
-                assigned
+                invoice: invId, lines: lines.length, markupSum,
+                placeholder: amount, soTotal, invoiceTotal, matched, assigned
             });
 
         } catch (e) {
             log.error('INVOICE EDGE BAND ERROR', {
-                invoice: context.newRecord.id,
-                message: e.message
+                invoice: context.newRecord.id, message: e.message
             });
         }
     };
