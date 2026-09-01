@@ -5,7 +5,8 @@
  * INVOICE - EDGE BAND PLACEHOLDER
  *
  * 1. Find 306264 + CLM_EB lines.
- * 2. Only ONE unique Item + PO107 + Assigned ID key allowed, else stop.
+ * 2. Only ONE unique Assigned ID allowed across those lines, else stop.
+ *    Lines with a blank Assigned ID belong to the group.
  * 3. Read the SO total out of custcol_boomi_edi_item_details BEFORE clearing it.
  * 4. Set every matching 306264 line rate = 0 and write its old amount into
  *    the Boomi field.
@@ -79,15 +80,12 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                     return true;
                 }
 
-                if (!assigned) return true;
-
                 lines.push({
                     lineKey: String(r.getValue('lineuniquekey') || ''),
                     amount: toAmount(r.getValue('amount')),
                     boomi: String(r.getValue(BOOMI_FIELD) || ''),
                     po107,
-                    assigned,
-                    key: MARKUP_ITEM + '|' + po107 + '|' + assigned
+                    assigned
                 });
 
                 return true;
@@ -101,10 +99,13 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
             if (!lines.length) return;
 
 
-            // one unique key only
-            const uniqueKeys = [...new Set(lines.map(l => l.key))];
+            // Assigned ID decides whether this is one charge or several.
+            // Blank Assigned ID lines belong to the group and are not counted.
+            const uniqueKeys = [...new Set(
+                lines.filter(l => l.assigned).map(l => l.po107 + '|' + l.assigned)
+            )];
 
-            if (uniqueKeys.length !== 1) {
+            if (uniqueKeys.length > 1) {
                 log.audit('STOP', {
                     invoice: invId,
                     reason: 'More than one unique Edge Band key',
@@ -151,8 +152,9 @@ define(['N/search', 'N/record', 'N/log'], (search, record, log) => {
                 });
             }
 
-            const po107    = lines[0].po107;
-            const assigned = lines[0].assigned;
+            const po107     = lines[0].po107;
+            const withId    = lines.filter(l => l.assigned)[0];
+            const assigned  = withId ? withId.assigned : '';
 
 
             // -----------------------------------------------------
