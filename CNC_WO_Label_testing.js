@@ -1,31 +1,100 @@
+
 /**
  * @NApiVersion 2.1
  * @NScriptType Suitelet
  * @NModuleScope SameAccount
  */
-define(['N/ui/serverWidget', 'N/record', 'N/https', 'N/log'],
-function(ui, record, https, log) {
+define([
+    'N/ui/serverWidget',
+    'N/record',
+    'N/render',
+    'N/log'
+], function(ui, record, render, log) {
 
-    var TEMPLATE_ID = 2;
-    var PRINTER_ID = 103;
-
-    function escapeHtml(value) {
+    function escapeXml(value) {
         return String(value == null ? '' : value)
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
+            .replace(/'/g, '&apos;');
+    }
+
+    function getWorkOrder(woId) {
+
+        var wo = record.load({
+            type: record.Type.WORK_ORDER,
+            id: Number(woId),
+            isDynamic: false
+        });
+
+        return {
+            wonumber: String(wo.getValue({
+                fieldId: 'tranid'
+            }) || ''),
+
+            item: String(wo.getText({
+                fieldId: 'assemblyitem'
+            }) || ''),
+
+            quantity: String(wo.getValue({
+                fieldId: 'quantity'
+            }) || '')
+        };
+    }
+
+    function generatePreview(data) {
+
+        var woNumber = escapeXml(data.wonumber);
+        var item = escapeXml(data.item);
+        var quantity = escapeXml(data.quantity);
+
+        var xml = '<?xml version="1.0"?>' +
+            '<!DOCTYPE pdf PUBLIC "-//big.faceless.org//report" "report-1.1.dtd">' +
+            '<pdf>' +
+            '<head>' +
+            '<style type="text/css">' +
+            'body { font-family: Helvetica, sans-serif; font-size: 12pt; }' +
+            '.heading { font-size: 21pt; font-weight: bold; }' +
+            '.fieldlabel { font-size: 12pt; font-weight: bold; }' +
+            '.fieldvalue { font-size: 18pt; font-weight: bold; }' +
+            '</style>' +
+            '</head>' +
+
+            '<body size="4in 6in" padding="0.25in">' +
+
+            '<p class="heading">WORK ORDER</p>' +
+            '<hr/>' +
+
+            '<p class="fieldlabel">WO Number:</p>' +
+            '<p class="fieldvalue">' + woNumber + '</p>' +
+
+            '<p class="fieldlabel">Assembly Item:</p>' +
+            '<p class="fieldvalue">' + item + '</p>' +
+
+            '<p class="fieldlabel">Quantity:</p>' +
+            '<p class="fieldvalue">' + quantity + '</p>' +
+
+            '<p>&#160;</p>' +
+
+            '<barcode codetype="code128" ' +
+            'showtext="true" ' +
+            'value="' + woNumber + '" ' +
+            'bar-width="1.5" ' +
+            'bar-height="65"/>' +
+
+            '</body></pdf>';
+
+        return render.xmlToPdf({
+            xmlString: xml
+        });
     }
 
     function onRequest(context) {
 
-        var params = context.request.parameters;
+        var params = context.request.parameters || {};
         var woId = params.custpage_wo_id || '';
-        var message = '';
-        var generated = '';
-        var details = null;
-        var failed = false;
+        var errorMessage = '';
 
         if (context.request.method === 'POST') {
 
@@ -33,219 +102,92 @@ function(ui, record, https, log) {
 
                 if (!/^[1-9]\d*$/.test(String(woId))) {
                     throw new Error(
-                        'Enter a valid Work Order internal ID.'
+                        'Enter a valid Work Order Internal ID.'
                     );
                 }
 
-                // Load Work Order
-                var wo = record.load({
-                    type: record.Type.WORK_ORDER,
-                    id: Number(woId),
-                    isDynamic: false
-                });
+                var data = getWorkOrder(woId);
 
-                var woNumber = wo.getValue({
-                    fieldId: 'tranid'
-                });
-
-                var assemblyItem = wo.getText({
-                    fieldId: 'assemblyitem'
-                }) || '';
-
-                var quantity = wo.getValue({
-                    fieldId: 'quantity'
-                });
-
-                details = {
-                    internalId: woId,
-                    wonumber: String(woNumber || ''),
-                    item: String(assemblyItem || ''),
-                    quantity: String(quantity == null ? '' : quantity)
-                };
-
-                if (!details.wonumber || !details.item) {
+                if (!data.wonumber || !data.item) {
                     throw new Error(
-                        'Work Order number or assembly item is missing.'
-                    );
-                }
-
-                // Match SIT LPC Label Design fields
-                var dataSet = [{
-                    wonumber: details.wonumber,
-                    item: details.item,
-                    quantity: details.quantity
-                }];
-
-                var options = {
-                    source: 'WO_LABEL_TEST_' + woId,
-                    templateId: TEMPLATE_ID,
-                    printer: PRINTER_ID,
-                    async: false,
-                    processType: 'GENERATE_AND_RETURN',
-                    dataSet: dataSet
-                };
-
-                log.audit({
-                    title: 'WO Label Test Request',
-                    details: JSON.stringify(options)
-                });
-
-                // Call SIT LPC REST API
-                var response = https.requestRestlet({
-                    scriptId: 'customscript_sit_lpc_rest_api',
-                    deploymentId: 'customdeploy_sit_lpc_rest_api',
-                    method: https.Method.POST,
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        api: 'printLabels',
-                        options: options
-                    })
-                });
-
-                var result;
-
-                try {
-                    result = JSON.parse(response.body);
-                } catch (parseError) {
-                    throw new Error(
-                        'Invalid API response. HTTP ' + response.code
+                        'Work Order number or Assembly Item is missing.'
                     );
                 }
 
                 log.audit({
-                    title: 'WO Label Test Response',
-                    details: JSON.stringify({
-                        http: response.code,
-                        success: result.success,
-                        message: result.message,
-                        code: result.code
-                    })
+                    title: 'WO Label Preview',
+                    details: {
+                        woId: woId,
+                        data: data
+                    }
                 });
 
-                if (Number(response.code) < 200 ||
-                    Number(response.code) >= 300 ||
-                    result.success !== true) {
+                var pdf = generatePreview(data);
 
-                    throw new Error(
-                        result.message ||
-                        result.code ||
-                        'Label generation failed.'
-                    );
-                }
+                pdf.name = 'WO_Label_' +
+                    data.wonumber + '.pdf';
 
-                var payload = result.payload || {};
+                context.response.writeFile({
+                    file: pdf,
+                    isInline: true
+                });
 
-                if (payload.file) {
-                    generated = String(
-                        payload.file.content || ''
-                    ).slice(0, 100000);
-                }
-
-                message =
-                    'Label generation successful.\n' +
-                    'No physical print requested.\n' +
-                    'API Record: ' +
-                    (payload.apiRecId || 'Not returned') + '\n' +
-                    'Print Log: ' +
-                    (payload.logId || 'Not returned');
+                return;
 
             } catch (e) {
 
-                failed = true;
-                message = e.message;
+                errorMessage = e.message;
 
                 log.error({
-                    title: 'WO Label Test Failed',
-                    details: {
-                        woId: woId,
-                        message: e.message,
-                        stack: e.stack
-                    }
+                    title: 'WO Label Preview Error',
+                    details: e
                 });
             }
         }
 
-        // Suitelet Form
         var form = ui.createForm({
             title: 'Work Order Label - Test'
         });
 
-        var intro = form.addField({
-            id: 'custpage_intro',
+        var info = form.addField({
+            id: 'custpage_info',
             type: ui.FieldType.INLINEHTML,
-            label: 'Instructions'
+            label: 'Information'
         });
 
-        intro.defaultValue =
-            '<div style="padding:10px;">' +
-            '<b>Template:</b> ' + TEMPLATE_ID + '<br>' +
-            '<b>Printer:</b> ' + PRINTER_ID + '<br>' +
-            '<b>Mode:</b> Generate Only - No Physical Print' +
+        info.defaultValue =
+            '<div style="padding:12px;">' +
+            '<b>Work Order Label Preview</b><br>' +
+            'Enter a Work Order Internal ID to view ' +
+            'the label using actual NetSuite data.' +
+            '<br>No physical printing will occur.' +
             '</div>';
 
-        var woField = form.addField({
+        var field = form.addField({
             id: 'custpage_wo_id',
             type: ui.FieldType.INTEGER,
             label: 'Work Order Internal ID'
         });
 
-        woField.isMandatory = true;
-        woField.defaultValue = String(woId);
+        field.isMandatory = true;
+        field.defaultValue = String(woId);
 
-        if (details) {
+        if (errorMessage) {
 
-            var info = form.addField({
-                id: 'custpage_details',
+            var errorField = form.addField({
+                id: 'custpage_error',
                 type: ui.FieldType.INLINEHTML,
-                label: 'Work Order Details'
+                label: 'Error'
             });
 
-            info.defaultValue =
-                '<div style="padding:10px;">' +
-                '<h3>Work Order Details</h3>' +
-                '<b>WO Number:</b> ' +
-                escapeHtml(details.wonumber) + '<br>' +
-                '<b>Assembly Item:</b> ' +
-                escapeHtml(details.item) + '<br>' +
-                '<b>Quantity:</b> ' +
-                escapeHtml(details.quantity) +
+            errorField.defaultValue =
+                '<div style="color:red;padding:10px;">' +
+                escapeXml(errorMessage) +
                 '</div>';
         }
 
-        if (message) {
-
-            var resultField = form.addField({
-                id: 'custpage_result',
-                type: ui.FieldType.INLINEHTML,
-                label: 'Result'
-            });
-
-            resultField.defaultValue =
-                '<pre style="padding:12px;white-space:pre-wrap;' +
-                'color:' + (failed ? '#b91c1c' : '#166534') +
-                ';">' + escapeHtml(message) + '</pre>';
-        }
-
-        if (generated) {
-
-            var output = form.addField({
-                id: 'custpage_output',
-                type: ui.FieldType.LONGTEXT,
-                label: 'Generated Label Output - ZPL'
-            });
-
-            output.defaultValue = generated;
-
-            output.updateDisplayType({
-                displayType: ui.FieldDisplayType.READONLY
-            });
-        }
-
         form.addSubmitButton({
-            label: 'Generate Label - Test Only'
+            label: 'Preview Label'
         });
 
         context.response.writePage(form);
