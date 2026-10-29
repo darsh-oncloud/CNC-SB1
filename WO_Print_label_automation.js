@@ -9,7 +9,7 @@ function(record, search, render, log) {
     var FOLDER_ID = 38805412;
 
     // Replace with the actual Sales Order eTail Order ID field ID
-    var ETAIL_FIELD = 'REPLACE_WITH_ETAIL_FIELD_ID';
+    var ETAIL_FIELD = 'custbody_celigo_etail_order_id';
 
     function escapeXml(value) {
         return String(value == null ? '' : value)
