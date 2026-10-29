@@ -199,7 +199,7 @@ function(record, search, render, log) {
 
     function afterSubmit(context) {
 
-        if (context.type !== context.UserEventType.CREATE) {
+        if (context.type !== context.UserEventType.EDIT) {
             return;
         }
 
