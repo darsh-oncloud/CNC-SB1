@@ -6,7 +6,7 @@
 define(['N/ui/serverWidget', 'N/record', 'N/https', 'N/log'],
 function(ui, record, https, log) {
 
-    var TEMPLATE_ID = 1895;
+    var TEMPLATE_ID = 1;
     var PRINTER_ID = 103;
 
     function escapeHtml(value) {
