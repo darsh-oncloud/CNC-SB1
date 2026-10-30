@@ -1,66 +1,68 @@
 /**
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
+ *
+ * TEST ONLY: renders the CNC BOM label for a new Work Order
+ * and saves the PDF to the File Cabinet. No printer API call.
  */
-define(['N/record', 'N/render', 'N/https', 'N/log'],
-function (record, render, https, log) {
+define(['N/record', 'N/render', 'N/log'],
+function (record, render, log) {
 
-    var PRINTER_ID = 103;
     var FOLDER_ID = 38805412;
+    var ETAIL_FIELD = 'custbody_celigo_etail_order_id';
 
     function afterSubmit(context) {
+
         if (context.type !== context.UserEventType.CREATE) return;
 
+        var woId = context.newRecord.id;
+
         try {
-            var woId = context.newRecord.id;
-
-            // 1. Should this WO print?
+            // 1. Same "when to print" rules as the old script
             var soId = context.newRecord.getValue('createdfrom');
-            if (!soId) return;
+            if (!soId) {
+                log.debug('Skipped', 'WO ' + woId + ' has no Created From');
+                return;
+            }
 
-            var so = record.load({ type: record.Type.SALES_ORDER, id: soId });
-            var etailId = so.getValue('custbody_celigo_etail_order_id');
-            if (!etailId || !String(etailId).trim()) return;
+            var so = record.load({
+                type: record.Type.SALES_ORDER,
+                id: soId
+            });
 
-            // 2. Render your CNC BOM template
+            var etailId = so.getValue(ETAIL_FIELD);
+            if (!etailId || !String(etailId).trim()) {
+                log.debug('Skipped', 'WO ' + woId + ' SO has no eTail ID');
+                return;
+            }
+
+            // 2. Render the label exactly like the Print BOM button
             var pdf = render.bom({
                 entityId: Number(woId),
                 printMode: render.PrintMode.PDF
             });
 
-            // 3. Save a copy
+            // 3. Save to the File Cabinet
             pdf.name = 'WO_Label_' + woId + '.pdf';
             pdf.folder = FOLDER_ID;
             var fileId = pdf.save();
 
-            // 4. Send to printer (fill in per RF-SMART docs)
-            var response = https.requestRestlet({
-                scriptId: 'customscript_sit_lpc_rest_api',
-                deploymentId: 'customdeploy_sit_lpc_rest_api',
-                method: https.Method.POST,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    api: 'printLabels',
-                    options: {
-                        source: 'WO_' + woId,
-                        printer: PRINTER_ID,
-                        async: false
-                        // + the PDF/file field from RF-SMART docs
-                    }
-                })
+            log.audit('WO Label PDF Saved', {
+                woId: woId,
+                soId: soId,
+                fileId: fileId
             });
 
-            var result = JSON.parse(response.body);
-            if (result.success !== true) {
-                throw new Error(result.message || 'Print failed');
-            }
-
-            log.audit('WO Label Printed', { woId: woId, fileId: fileId });
-
         } catch (e) {
-            log.error('WO Label Failed', { woId: context.newRecord.id, message: e.message });
+            log.error('WO Label Test Failed', {
+                woId: woId,
+                message: e.message,
+                stack: e.stack
+            });
         }
     }
 
-    return { afterSubmit: afterSubmit };
+    return {
+        afterSubmit: afterSubmit
+    };
 });
