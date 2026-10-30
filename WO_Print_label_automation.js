@@ -30,7 +30,7 @@ function (record, search, runtime, https, log) {
     // ---------- Main ----------
     function afterSubmit(context) {
 
-        if (context.type !== context.UserEventType.CREATE) return;
+        if (context.type !== context.UserEventType.EDIT) return;
 
         var woId = context.newRecord.id;
 
