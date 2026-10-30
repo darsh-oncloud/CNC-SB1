@@ -254,6 +254,11 @@ function (record, search, runtime, https, log) {
             dataSet: labels
         };
 
+        var requestBody = JSON.stringify({ api: 'printLabels', options: options });
+
+        // What we SEND to the printer API
+        logLong('WO ' + woId + ' - REQUEST', requestBody);
+
         var response = https.requestRestlet({
             scriptId: RESTLET_SCRIPT,
             deploymentId: RESTLET_DEPLOY,
@@ -262,8 +267,12 @@ function (record, search, runtime, https, log) {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
             },
-            body: JSON.stringify({ api: 'printLabels', options: options })
+            body: requestBody
         });
+
+        // What we GET BACK from the printer API
+        log.debug('WO ' + woId + ' - RESPONSE CODE', response.code);
+        logLong('WO ' + woId + ' - RESPONSE BODY', response.body);
 
         var result = {};
         try {
@@ -281,6 +290,19 @@ function (record, search, runtime, https, log) {
     }
 
     // ---------- Helpers ----------
+
+    // NetSuite cuts log details at ~3,999 characters, so long text is split into parts
+    function logLong(title, text) {
+        text = String(text === null || text === undefined ? '' : text);
+        var size = 3900;
+        var parts = Math.max(1, Math.ceil(text.length / size));
+        for (var p = 0; p < parts; p++) {
+            log.debug(
+                parts > 1 ? title + ' (' + (p + 1) + '/' + parts + ')' : title,
+                text.substring(p * size, (p + 1) * size)
+            );
+        }
+    }
 
     // Text of a field (list/date fields give their display text)
     function fieldText(rec, fieldId) {
